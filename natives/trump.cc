@@ -1,5 +1,4 @@
-#ifdef MAGICK_ENABLED
-#include <Magick++.h>
+#include <vips/vips8>
 
 #include <cstring>
 #include <iostream>
@@ -8,64 +7,61 @@
 #include "common.h"
 
 using namespace std;
-using namespace Magick;
+using namespace vips;
 
 ArgumentMap Trump(string type, string *outType, char *BufferData, size_t BufferLength,
             [[maybe_unused]] ArgumentMap Arguments, size_t *DataSize) {
-    int delay = GetArgumentWithFallback<int>(Arguments, "delay", 0);
-    Blob blob;
+    string basePath = GetArgument<string>(Arguments, "basePath");
+    
+  	VOption *options = VImage::option()->set("access", "sequential");
 
-    list<Image> frames;
-    list<Image> coalesced;
-    list<Image> mid;
-    Image watermark;
-    try {
-      readImages(&frames, Blob(BufferData, BufferLength));
-    } catch (Magick::WarningCoder &warning) {
-      cerr << "Coder Warning: " << warning.what() << endl;
-    } catch (Magick::Warning &warning) {
-      cerr << "Warning: " << warning.what() << endl;
-    }
-    watermark.read("./assets/images/trump.png");
-    coalesceImages(&coalesced, frames.begin(), frames.end());
+	VImage in =
+      VImage::new_from_buffer(BufferData, BufferLength, "",
+                              type == "gif" ? options->set("n", -1) : options)
+          .colourspace(VIPS_INTERPRETATION_sRGB);
+  	if (!in.has_alpha()) in = in.bandjoin(255);
 
-    for (Image &image : coalesced) {
-      Image watermark_new = watermark;
-      image.virtualPixelMethod(Magick::TransparentVirtualPixelMethod);
-      image.backgroundColor("none");
-      image.scale(Geometry("365x179!"));
-      double arguments[16] = {0,   0,   207, 268, 365, 0,   548, 271,
-                              365, 179, 558, 450, 0,   179, 193, 450};
-      image.distort(Magick::PerspectiveDistortion, 16, arguments, true);
-      image.extent(Geometry("800x450"), Magick::CenterGravity);
-      watermark_new.composite(image, Geometry("-25+134"),
-                              Magick::DstOverCompositeOp);
-      watermark_new.magick(type);
-      watermark_new.animationDelay(delay == 0 ? image.animationDelay() : delay);
-      watermark_new.gifDisposeMethod(Magick::BackgroundDispose);
-      mid.push_back(watermark_new);
-    }
+	string assetPath = basePath + "assets/images/trump.png";
+ 	VImage tmpl = VImage::new_from_file(assetPath.c_str());
 
-    optimizeTransparency(mid.begin(), mid.end());
+	int width = in.width();
+	int pageHeight = vips_image_get_page_height(in.get_image());
+	int nPages = vips_image_get_n_pages(in.get_image());
 
-    if (type == "gif") {
-      for (Image &image : mid) {
-        image.quantizeDitherMethod(FloydSteinbergDitherMethod);
-        image.quantize();
-      }
-    }
+	// string distortPath = basePath + "assets/images/trumpmap.png";
+	// VImage distort = VImage::new_from_file(distortPath.c_str());
 
-    writeImages(mid.begin(), mid.end(), &blob);
+	// VImage distortImage =
+	// 	((distort[1] / 255) * 414).bandjoin((distort[0] / 255) * 233);
 
-    *DataSize = blob.length();
+	vector<VImage> img;
+	for (int i = 0; i < nPages; i++) {
+		VImage img_frame =
+			type == "gif" ? in.crop(0, i * pageHeight, width, pageHeight) : in;
+		VImage resized =
+		//365, 179 
+			img_frame
+            	.resize(365 / (double)width,
+                    VImage::option()->set("vscale", 182 / (double)pageHeight))
+				// .mapim(distortImage)
+                //         .extract_band(0, VImage::option()->set("n", 3))
+                //         .bandjoin(distort[2])
+				.embed(193, 271, 800, 450, VImage::option()->set("extend", "white"));
+		VImage composited = resized.composite2(tmpl, VIPS_BLEND_MODE_OVER);
+		img.push_back(composited);
+	}
+	VImage final = VImage::arrayjoin(img, VImage::option()->set("across", 1));
+	final.set(VIPS_META_PAGE_HEIGHT, 450);
+	
+	void *buf;
+	final.write_to_buffer(
+		("." + *outType).c_str(), &buf, DataSize,
+		*outType == "gif"
+			? VImage::option()->set("dither", 0)->set("reoptimise", 1)
+			: 0);
 
-    char *data = (char *)malloc(*DataSize);
-    memcpy(data, blob.data(), *DataSize);
+	ArgumentMap output;
+	output["buf"] = (char *)buf;
 
-    ArgumentMap output;
-    output["buf"] = data;
-
-    return output;
+	return output;
 }
-
-#endif
